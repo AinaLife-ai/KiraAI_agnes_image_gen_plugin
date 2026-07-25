@@ -1,0 +1,101 @@
+{
+  "section_api": {
+    "type": "section",
+    "name": "API 设置",
+    "collapsed": false,
+    "fields": {
+      "api_key": {
+        "type": "sensitive",
+        "name": "API Key",
+        "default": "",
+        "hint": "Agnes AI API 密钥 (sk-...)"
+      },
+      "api_base": {
+        "type": "string",
+        "name": "API 地址",
+        "default": "https://apihub.agnes-ai.com/v1/images/generations",
+        "hint": "API 端点 URL"
+      },
+      "model": {
+        "type": "string",
+        "name": "模型",
+        "default": "agnes-image-2.1-flash",
+        "hint": "使用的生成模型名称"
+      },
+      "timeout": {
+        "type": "integer",
+        "name": "请求超时（秒）",
+        "default": 120,
+        "hint": "API 请求和图片下载的超时时间，范围 5~300 秒"
+      }
+    }
+  },
+  "section_generation": {
+    "type": "section",
+    "name": "生成设置",
+    "collapsed": false,
+    "fields": {
+      "default_size": {
+        "type": "string",
+        "name": "默认尺寸",
+        "options": ["1024x1024", "768x1024", "1024x768", "1024x576", "576x1024"],
+        "default": "1024x1024"
+      },
+      "default_style": {
+        "type": "string",
+        "name": "默认风格",
+        "options": ["anime", "realistic", "oil_painting", "watercolor"],
+        "default": "anime"
+      },
+      "max_count": {
+        "type": "integer",
+        "name": "单次最大生成张数",
+        "default": 4,
+        "hint": "限制单次调用最多生成几张，范围 1~10"
+      },
+      "selfie_image_path": {
+        "type": "string",
+        "name": "角色形象参考图路径",
+        "default": "",
+        "hint": "Bot 角色自身的形象参考图片路径。支持相对路径和绝对路径。留空则自动读取 KiraAI 系统设置的 selfie 形象参考图。当用户要求看 Bot 角色自身的图片/自拍/形象照时，AI 会自动用此图作为图生图参考。"
+      }
+    }
+  },
+  "section_sending": {
+    "type": "section",
+    "name": "发送设置",
+    "collapsed": false,
+    "fields": {
+      "send_as_forward": {
+        "type": "switch",
+        "name": "合并转发发送",
+        "default": true,
+        "hint": "多张图片以合并转发形式发送（仅 QQ 平台支持），关闭则逐张直接发送"
+      },
+      "image_storage_dir": {
+        "type": "string",
+        "name": "图片存储目录",
+        "default": "files/agnes",
+        "hint": "生成图片的本地缓存目录，相对于 data/ 目录"
+      },
+      "save_generated": {
+        "type": "switch",
+        "name": "保留生成图片",
+        "default": true,
+        "hint": "关闭则发送后立即删除本地文件"
+      },
+      "max_cache_files": {
+        "type": "integer",
+        "name": "缓存文件上限",
+        "default": 100,
+        "hint": "本地缓存图片数量上限，0=不限制，超出时自动清理旧文件"
+      },
+      "proxy": {
+        "type": "string",
+        "name": "HTTP 代理",
+        "default": "",
+        "hint": "如 http://127.0.0.1:10809，留空则不使用代理"
+      }
+    }
+  }
+}
