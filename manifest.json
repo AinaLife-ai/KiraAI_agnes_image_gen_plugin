@@ -4,5 +4,6 @@
   "version": "1.0.0",
   "author": "znq19",
   "description": "通过 Agnes AI API 生成图片，支持文生图和图生图，生成后自动发送到聊天（支持合并转发）",
+  "repo": "https://github.com/znq19/KiraAI_agnes_image_gen_plugin",
   "core_version": ">=2.6.1"
 }
