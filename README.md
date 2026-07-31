@@ -41,7 +41,7 @@ KiraAI/
 3. 打开 KiraAI WebUI → 插件管理 → 找到 "Agnes AI 图片生成" → 启用
 4. **填写 API Key**（必填）：
 
-> API Key 是 `sk-` 开头的密钥，从 Agnes AI 获取。没有的话去 [Agnes AI](https://apihub.agnes-ai.com) 注册。（目前纯免费白嫖）
+> API Key 是 `sk-` 开头的密钥，从 Agnes AI 获取。没有的话去 [Agnes AI](https://apihub.agnes-ai.com) 注册。（目前纯免费白嫖，如你发现你使用它国际站的base url和key无法生成，可换用中国站：https://platform.agnes-ai.cn/）
 
 ## 配置说明
 
