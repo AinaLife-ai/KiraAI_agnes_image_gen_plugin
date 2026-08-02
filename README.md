@@ -1,7 +1,7 @@
 # Agnes AI 图片生成插件
 
 [![KiraAI](https://img.shields.io/badge/KiraAI-插件-blue)](https://github.com/znq19/KiraAI)
-[![版本](https://img.shields.io/badge/version-1.0.0-green)]()
+[![版本](https://img.shields.io/badge/version-1.1.0-green)]()
 [![Python](https://img.shields.io/badge/Python-3.10+-yellow)]()
 
 > 让 KiraAI 的 Bot 能通过 Agnes AI 快速生成高质量（大概是吧）图片，**自动发送到聊天**，全程无需手动操作。
@@ -91,3 +91,28 @@ KiraAI 会在首次加载时自动安装依赖。
 ## License
 
 AGPLv 3.0
+
+<details>
+<summary>📜 更新日志</summary>
+
+### v1.1.0（2026-08-02）
+
+**修复**
+- 修复本地参考图路径解析失败：LLM 传入的 `data/temp/xxx.jpg` 会被错误拼成 `data/data/temp/xxx.jpg`（data 前缀重复）。现在自动尝试多种路径写法（相对 data 目录 / 相对根目录 / 绝对路径）
+- 修复参考图解析失败时**静默降级为文生图**的问题：之前参考图找不到会假装"图生图成功"（实际是无参考生成的图）。现在会显式报错并提示正确的路径格式
+- 参考图解析逻辑前移到工具层，解析失败直接返回错误，不再假成功
+
+**改进**
+- 新增「角色形象图」模式：配置 Bot 角色参考图后，用户说"你长什么样""发张自拍"即可自动图生图
+- 角色参考图留空时自动读取 KiraAI 系统设置的 selfie 图
+- 移除不支持的 `response_format` 参数（修复 400 报错）
+- API 繁忙（429/5xx）时自动等待重试，最多 3 次；4xx 参数错误不再无意义重试
+- 图生图工具说明优化：明确告诉 AI 用消息上下文的 `file_path` 作为参考图
+
+### v1.0.0（2026-07-24）
+
+- 首个版本：文生图 / 图生图，4 种风格 × 5 种尺寸
+- 多图合并转发（QQ）+ 失败自动回退逐张发送
+- 缓存管理与自动清理，支持 HTTP 代理
+
+</details>

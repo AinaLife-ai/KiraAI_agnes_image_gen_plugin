@@ -189,7 +189,8 @@ class AgnesImageGenPlugin(BasePlugin):
             prompt: 图片描述提示词（英文）
             size: 图片尺寸
             n: 生成数量
-            reference_image_url: 参考图片（URL 或本地文件路径，图生图模式）
+            reference_image_url: 已解析的参考图片（URL 或 data URL），
+                由调用方先通过 _resolve_reference_image 处理
 
         Returns:
             生成的图片 URL 列表，失败返回 None
@@ -207,11 +208,9 @@ class AgnesImageGenPlugin(BasePlugin):
         }
 
         if reference_image_url:
-            ref_url = await self._resolve_reference_image(reference_image_url)
-            if ref_url:
-                payload["extra_body"] = {
-                    "image": [ref_url],
-                }
+            payload["extra_body"] = {
+                "image": [reference_image_url],
+            }
 
         timeout = aiohttp.ClientTimeout(total=self.timeout)
         kwargs_base = {"headers": headers, "json": payload, "timeout": timeout}
@@ -295,6 +294,42 @@ class AgnesImageGenPlugin(BasePlugin):
         )
         return None
 
+    @staticmethod
+    def _resolve_local_reference_path(reference: str) -> Optional[Path]:
+        """把参考图路径解析为真实存在的本地文件（多候选）
+
+        KiraAI 生态中 LLM 可能给出几种相对路径写法：
+        - ``data/temp/xxx.jpg``  → 相对 KiraAI 根目录（含 data 前缀）
+        - ``temp/xxx.jpg``       → 相对 data/ 目录（无 data 前缀）
+        - 绝对路径 ``C:\\...\\data\\temp\\xxx.jpg``
+
+        逐个尝试，返回第一个存在的文件；都不存在返回 None。
+        """
+        if not reference:
+            return None
+
+        ref = Path(reference)
+        if ref.is_absolute():
+            return ref if ref.is_file() else None
+
+        data_dir = Path(get_data_path())
+        root_dir = data_dir.parent  # KiraAI 根目录
+        rel = reference.replace("\\", "/")
+
+        candidates: List[Path] = []
+        # 候选1: 相对 data/ 目录，如 "temp/xxx.jpg"
+        candidates.append(data_dir / rel)
+        # 候选2: 去掉 data/ 前缀后相对 data/ 目录，如 "data/temp/xxx.jpg" → "temp/xxx.jpg"
+        if rel.startswith("data/"):
+            candidates.append(data_dir / rel[len("data/"):])
+        # 候选3: 相对根目录（含 data 前缀），如 "data/temp/xxx.jpg"
+        candidates.append(root_dir / rel)
+
+        for cand in candidates:
+            if cand.is_file():
+                return cand
+        return None
+
     async def _resolve_reference_image(self, reference: str) -> Optional[str]:
         """解析参考图片来源，支持 URL 和本地文件路径
 
@@ -311,17 +346,12 @@ class AgnesImageGenPlugin(BasePlugin):
         if reference.startswith(("http://", "https://", "data:")):
             return reference
 
-        # 本地文件路径：解析并转为 base64 data URL
+        # 本地文件路径：多候选解析
         try:
-            ref_path = Path(reference)
-            # 相对路径 → 尝试相对 data/ 目录解析
-            if not ref_path.is_absolute():
-                data_dir = Path(get_data_path())
-                ref_path = data_dir / reference
-
-            if not ref_path.is_file():
+            ref_path = self._resolve_local_reference_path(reference)
+            if ref_path is None:
                 logger.warning(
-                    f"[agnes_image_gen] 参考图文件不存在: {ref_path}"
+                    f"[agnes_image_gen] 参考图文件不存在: {reference}"
                 )
                 return None
 
@@ -607,9 +637,12 @@ class AgnesImageGenPlugin(BasePlugin):
                 "reference_image_url": {
                     "type": "string",
                     "description": (
-                        "参考图片的 URL 地址。用于图生图模式，基于该图片生成新图片。"
-                        "如果用户说「基于这张图」「图生图」「参考这张图」并提供图片，"
-                        "填该图片的 URL。不填则为纯文生图。"
+                        "参考图片，用于图生图模式。支持三种形式："
+                        "1) http(s):// 图片 URL；"
+                        "2) KiraAI 相对路径（如 data/temp/xxx.jpg，消息上下文中图片的 file_path 就是这种）；"
+                        "3) 绝对路径。"
+                        "当用户发来图片并说「基于这张图」「图生图」「参考这张图」时，"
+                        "把该图片在消息上下文中的 file_path 填到这里。"
                         "注意：如果用户要看 Bot 角色自身的形象图/自拍，应该用 use_selfie=true 而不是传此参数。"
                     ),
                 },
@@ -667,6 +700,21 @@ class AgnesImageGenPlugin(BasePlugin):
                 )
             reference_image_url = self.selfie_image_path
 
+        # 解析参考图（URL 或本地路径 → 可用形式），失败显式报错
+        ref_url: Optional[str] = None
+        if reference_image_url:
+            ref_url = await self._resolve_reference_image(reference_image_url)
+            if ref_url is None:
+                return (
+                    "错误：参考图解析失败，找不到文件："
+                    f"{reference_image_url}\n"
+                    "支持的形式：\n"
+                    "- http(s):// 图片 URL\n"
+                    "- KiraAI 相对路径（如 data/temp/xxx.jpg 或 temp/xxx.jpg）\n"
+                    "- 绝对路径（如 C:/.../data/temp/xxx.jpg）\n"
+                    "如果用户刚发来图片，请优先使用消息上下文中记录的 file_path。"
+                )
+
         # 构建完整提示词
         style_prompt = STYLE_PROMPTS.get(style, STYLE_PROMPTS["anime"])
         full_prompt = f"{prompt}, {style_prompt}"
@@ -690,7 +738,7 @@ class AgnesImageGenPlugin(BasePlugin):
             prompt=full_prompt,
             size=size,
             n=count,
-            reference_image_url=reference_image_url if reference_image_url else None,
+            reference_image_url=ref_url,
         )
 
         if not urls:
@@ -749,7 +797,8 @@ class AgnesImageGenPlugin(BasePlugin):
                     '- 用户说"画一张""生图""AI画图""生成图片"等 -> 调用此工具\n'
                     "- **必须**把中文提示词翻译并扩写为详细的英文提示词（描述构图、风格、光照、色彩等）\n"
                     "- 默认风格是动漫插画，用户可指定写实/油画/水彩\n"
-                    "- 如果用户提供了参考图片 URL，填到 reference_image_url 参数中（图生图）\n"
+                    "- 图生图时：把用户刚发图片的 file_path（如 data/temp/xxx.jpg）"
+                    "填到 reference_image_url，本地路径会被自动处理\n"
                     + selfie_note +
                     "- 图片由工具自动生成并发送到聊天，你只需回复简短确认，**严禁用 <file> 标签再次发图**\n"
                 )
