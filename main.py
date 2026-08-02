@@ -181,7 +181,7 @@ class AgnesImageGenPlugin(BasePlugin):
         prompt: str,
         size: str = "1024x1024",
         n: int = 1,
-        reference_image_url: Optional[str] = None,
+        reference_image_urls: Optional[List[str]] = None,
     ) -> Optional[List[str]]:
         """调用 Agnes AI 图片生成 API（带自动重试）
 
@@ -189,8 +189,8 @@ class AgnesImageGenPlugin(BasePlugin):
             prompt: 图片描述提示词（英文）
             size: 图片尺寸
             n: 生成数量
-            reference_image_url: 已解析的参考图片（URL 或 data URL），
-                由调用方先通过 _resolve_reference_image 处理
+            reference_image_urls: 已解析的参考图片列表（URL 或 data URL），
+                由调用方先通过 _resolve_reference_image 逐张处理
 
         Returns:
             生成的图片 URL 列表，失败返回 None
@@ -207,9 +207,9 @@ class AgnesImageGenPlugin(BasePlugin):
             "n": n,
         }
 
-        if reference_image_url:
+        if reference_image_urls:
             payload["extra_body"] = {
-                "image": [reference_image_url],
+                "image": reference_image_urls,
             }
 
         timeout = aiohttp.ClientTimeout(total=self.timeout)
@@ -637,13 +637,15 @@ class AgnesImageGenPlugin(BasePlugin):
                 "reference_image_url": {
                     "type": "string",
                     "description": (
-                        "参考图片，用于图生图模式。支持三种形式："
+                        "参考图片，用于图生图模式。支持多张，用英文逗号分隔（最多 4 张）。"
+                        "每张支持三种形式："
                         "1) http(s):// 图片 URL；"
                         "2) KiraAI 相对路径（如 data/temp/xxx.jpg，消息上下文中图片的 file_path 就是这种）；"
                         "3) 绝对路径。"
                         "当用户发来图片并说「基于这张图」「图生图」「参考这张图」时，"
                         "把该图片在消息上下文中的 file_path 填到这里。"
-                        "注意：如果用户要看 Bot 角色自身的形象图/自拍，应该用 use_selfie=true 而不是传此参数。"
+                        "若用户想「角色形象 + 指定参考图」一起作为参考，可同时将 use_selfie 设为 true。"
+                        "（纯角色形象图/自拍场景用 use_selfie=true 即可，不必填此参数）"
                     ),
                 },
                 "use_selfie": {
@@ -653,8 +655,8 @@ class AgnesImageGenPlugin(BasePlugin):
                         "当用户要求看 Bot 角色自身的图片（即「你」的图片），如说"
                         "「你长什么样」「发张自拍」「发张你的照片」「看看你的样子」"
                         "「你的二次元形象」「你换个场景/衣服看看」等时，设为 true。"
-                        "设为 true 后无需再填 reference_image_url，工具会自动读取"
-                        "Bot 角色的形象参考图。"
+                        "可以和其他参考图同时使用（如「用你的形象加上这张图的场景」），"
+                        "此时形象参考图会被放在参考图列表首位。"
                     ),
                 },
             },
@@ -665,8 +667,8 @@ class AgnesImageGenPlugin(BasePlugin):
         self,
         event: KiraMessageBatchEvent,
         prompt: str,
-        size: str = "1024x1024",
-        style: str = "anime",
+        size: Optional[str] = None,
+        style: Optional[str] = None,
         count: int = 1,
         reference_image_url: str = "",
         use_selfie: bool = False,
@@ -683,37 +685,50 @@ class AgnesImageGenPlugin(BasePlugin):
                 "请管理员在 KiraAI WebUI 的插件设置中填写 API Key。"
             )
 
-        # 参数校验与回退默认值
-        if size not in SIZE_OPTIONS:
+        # 参数校验：未传或非法时回退到插件配置的默认值
+        if size is None or size not in SIZE_OPTIONS:
             size = self.default_size
-        if style not in STYLE_PROMPTS:
+        if style is None or style not in STYLE_PROMPTS:
             style = self.default_style
         count = max(1, min(self.max_count, count))
-        reference_image_url = reference_image_url.strip() or ""
 
-        # 自我形象参考图处理
+        # 收集参考图列表（use_selfie 与 reference_image_url 可叠加）
+        raw_refs: List[str] = []
         if use_selfie:
             if not self.selfie_image_path:
                 return (
                     "错误：未配置自我形象参考图。"
                     "请在 KiraAI 系统设置或插件设置中配置形象参考图路径后重试。"
                 )
-            reference_image_url = self.selfie_image_path
-
-        # 解析参考图（URL 或本地路径 → 可用形式），失败显式报错
-        ref_url: Optional[str] = None
+            raw_refs.append(self.selfie_image_path)
         if reference_image_url:
-            ref_url = await self._resolve_reference_image(reference_image_url)
-            if ref_url is None:
+            for part in reference_image_url.split(","):
+                part = part.strip()
+                if part:
+                    raw_refs.append(part)
+
+        # 参考图数量上限（Agnes API / litellm 对 image 数组有限制）
+        if len(raw_refs) > 4:
+            return (
+                "错误：参考图最多支持 4 张，当前收到 "
+                f"{len(raw_refs)} 张。请减少参考图数量后重试。"
+            )
+
+        # 解析每张参考图（URL 直通 / 本地路径转 data URL），失败显式报错
+        ref_urls: List[str] = []
+        for ref in raw_refs:
+            resolved = await self._resolve_reference_image(ref)
+            if resolved is None:
                 return (
                     "错误：参考图解析失败，找不到文件："
-                    f"{reference_image_url}\n"
+                    f"{ref}\n"
                     "支持的形式：\n"
                     "- http(s):// 图片 URL\n"
                     "- KiraAI 相对路径（如 data/temp/xxx.jpg 或 temp/xxx.jpg）\n"
                     "- 绝对路径（如 C:/.../data/temp/xxx.jpg）\n"
                     "如果用户刚发来图片，请优先使用消息上下文中记录的 file_path。"
                 )
+            ref_urls.append(resolved)
 
         # 构建完整提示词
         style_prompt = STYLE_PROMPTS.get(style, STYLE_PROMPTS["anime"])
@@ -721,7 +736,7 @@ class AgnesImageGenPlugin(BasePlugin):
 
         if use_selfie:
             mode_str = "角色形象图生图"
-        elif reference_image_url:
+        elif ref_urls:
             mode_str = "图生图"
         else:
             mode_str = "文生图"
@@ -730,7 +745,7 @@ class AgnesImageGenPlugin(BasePlugin):
         logger.info(
             f"[agnes_image_gen] 开始生成: "
             f"模式={mode_str}, 风格={style_label}, 尺寸={size_label}, "
-            f"数量={count}, prompt={full_prompt[:100]}..."
+            f"数量={count}, 参考图={len(ref_urls)}张, prompt={full_prompt[:100]}..."
         )
 
         # 调用 API 生成图片
@@ -738,7 +753,7 @@ class AgnesImageGenPlugin(BasePlugin):
             prompt=full_prompt,
             size=size,
             n=count,
-            reference_image_url=ref_url,
+            reference_image_urls=ref_urls if ref_urls else None,
         )
 
         if not urls:
@@ -787,6 +802,7 @@ class AgnesImageGenPlugin(BasePlugin):
                 "用户要求看 Bot 角色自身（即「你」）的图片时，将 use_selfie 设为 true——"
                 "例如用户说「你长什么样」「发张你的自拍」「看看你的样子」「你的形象图」"
                 "「你换个场景/衣服/姿势」「你拍张照」等。"
+                "可与 reference_image_url 同时使用（如「用你的形象 + 这张图的场景」）。"
                 "prompt 中用 'the character' 指代 Bot 角色，不要描述外貌特征（参考图已有）。\n"
             )
 
@@ -798,7 +814,8 @@ class AgnesImageGenPlugin(BasePlugin):
                     "- **必须**把中文提示词翻译并扩写为详细的英文提示词（描述构图、风格、光照、色彩等）\n"
                     "- 默认风格是动漫插画，用户可指定写实/油画/水彩\n"
                     "- 图生图时：把用户刚发图片的 file_path（如 data/temp/xxx.jpg）"
-                    "填到 reference_image_url，本地路径会被自动处理\n"
+                    "填到 reference_image_url，本地路径会被自动处理；"
+                    "多张参考图用英文逗号分隔（最多 4 张）\n"
                     + selfie_note +
                     "- 图片由工具自动生成并发送到聊天，你只需回复简短确认，**严禁用 <file> 标签再次发图**\n"
                 )
