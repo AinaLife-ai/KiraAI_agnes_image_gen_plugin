@@ -53,6 +53,12 @@
         "default": 4,
         "hint": "限制单次调用最多生成几张，范围 1~10"
       },
+      "async_generate": {
+        "type": "switch",
+        "name": "异步生成",
+        "default": true,
+        "hint": "默认开启：工具快速返回，图片在后台生成，完成后自动发送并通知 AI 补一句'已生成'，期间不阻塞 AI 回复、不触发工具超时。关闭则工具等生成完再返回（同步）。"
+      },
       "selfie_image_path": {
         "type": "string",
         "name": "角色形象参考图路径",

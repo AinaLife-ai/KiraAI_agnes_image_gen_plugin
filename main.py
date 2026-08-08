@@ -11,14 +11,14 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 import aiohttp
 
 from core.plugin import BasePlugin, logger, on, Priority, register
 from core.chat.message_utils import KiraMessageEvent, KiraMessageBatchEvent
 from core.chat import MessageChain
-from core.chat.message_elements import Image
+from core.chat.message_elements import Image, Text
 from core.provider import LLMRequest
 from core.utils.path_utils import get_data_path
 
@@ -93,6 +93,9 @@ class AgnesImageGenPlugin(BasePlugin):
             self.default_style = "anime"
         self.max_count: int = max(1, min(10, gen_sec.get("max_count", 4)))
 
+        # 异步生成：工具快速返回，后台生成+发送，完成后 publish_notice 通知 LLM 接话（默认开）
+        self.async_generate: bool = gen_sec.get("async_generate", True)
+
         # 自我形象参考图：优先用插件配置，未配置则自动读取 KiraAI 系统设置
         self.selfie_image_path: str = gen_sec.get("selfie_image_path", "")
         if not self.selfie_image_path:
@@ -120,6 +123,8 @@ class AgnesImageGenPlugin(BasePlugin):
         self.proxy: str = send_sec.get("proxy", "")
 
         self._storage_dir: Optional[Path] = None
+        # 后台生成任务（按 sid 管理）：异步模式下工具快速返回，生成完成后 publish_notice 通知 LLM
+        self._gen_tasks: Dict[str, asyncio.Task] = {}
 
     async def initialize(self):
         """初始化存储目录，验证配置，清理缓存"""
@@ -145,8 +150,11 @@ class AgnesImageGenPlugin(BasePlugin):
         await self._cleanup_cache()
 
     async def terminate(self):
-        """清理资源（无持久连接需关闭）"""
-        pass
+        """清理资源（无持久连接需关闭）；取消后台生成任务"""
+        for t in list(self._gen_tasks.values()):
+            if not t.done():
+                t.cancel()
+        self._gen_tasks.clear()
 
     # ── 缓存管理 ─────────────────────────────────────────────────
 
@@ -435,6 +443,18 @@ class AgnesImageGenPlugin(BasePlugin):
 
         return f"{adapter}:dm:0"
 
+    # ── 后台任务通知 ────────────────────────────────────────────
+
+    async def _publish_notice(self, sid: str, text: str) -> None:
+        """publish_notice：构造合成事件进主线路，LLM 接话完成回复（消息合并进会话）。
+
+        用于后台生成任务完成后，让 LLM 补一句"图片已生成"并自然合并消息。
+        """
+        try:
+            await self.ctx.publish_notice(sid, MessageChain([Text(text)]), is_mentioned=True)
+        except Exception:
+            logger.exception("[agnes_image_gen] publish_notice failed")
+
     # ── 消息发送 ─────────────────────────────────────────────────
 
     async def _send_image_directly(
@@ -597,6 +617,8 @@ class AgnesImageGenPlugin(BasePlugin):
             "如果用户要求看 Bot 角色自身的形象图/自拍（如「你长什么样」「发张自拍」「看看你的样子」），"
             "将 use_selfie 设为 true，工具会自动使用 Bot 角色自身的形象参考图进行图生图。"
             "图片生成和发送全自动完成，你只需告知用户结果即可，不要再用 <file> 标签发图。"
+            "生成需要数十秒，工具会快速返回，图片生成完成后会自动发送并通知你，"
+            "收到通知后再告知用户图片已生成。"
         ),
         params={
             "type": "object",
@@ -748,46 +770,95 @@ class AgnesImageGenPlugin(BasePlugin):
             f"数量={count}, 参考图={len(ref_urls)}张, prompt={full_prompt[:100]}..."
         )
 
-        # 调用 API 生成图片
-        urls = await self._call_agnes_api(
-            prompt=full_prompt,
-            size=size,
-            n=count,
-            reference_image_urls=ref_urls if ref_urls else None,
-        )
-
-        if not urls:
+        # 同步模式（async_generate=false）：保持原行为，工具等生成完再返回
+        if not self.async_generate:
+            urls = await self._call_agnes_api(
+                prompt=full_prompt,
+                size=size,
+                n=count,
+                reference_image_urls=ref_urls if ref_urls else None,
+            )
+            if not urls:
+                return (
+                    "生成失败：Agnes AI API 不可用（已自动重试 3 次）。"
+                    "可能原因：API 队列繁忙（高峰期）、API Key 无效、账户余额不足。"
+                    "请告知用户「服务器繁忙，稍等 10~20 秒后再试」，不要反复立即重试。"
+                )
+            sent_paths = await self._download_and_send(event, urls)
+            if not sent_paths:
+                return (
+                    "生成失败：API 返回了图片链接，但所有图片下载或发送均失败。"
+                    "请检查网络连接是否正常。"
+                )
+            send_mode = (
+                "合并转发"
+                if (self.send_as_forward and len(sent_paths) > 1)
+                else "直接发送"
+            )
+            paths_str = "\n".join(f"  - {p}" for p in sent_paths)
             return (
-                "生成失败：Agnes AI API 不可用（已自动重试 3 次）。"
-                "可能原因：API 队列繁忙（高峰期）、API Key 无效、账户余额不足。"
-                "请告知用户「服务器繁忙，稍等 10~20 秒后再试」，不要反复立即重试。"
+                f"已成功以「{send_mode}」发送 {len(sent_paths)} 张图片到当前聊天。\n"
+                f"──────────────────────\n"
+                f"模式：{mode_str}  风格：{style_label}  尺寸：{size_label}\n"
+                f"──────────────────────\n"
+                f"这些图片已由工具直接发送完毕，你无需再次发送，也禁止使用 <file> 标签。\n"
+                f"请用中文简短告知用户图片已生成即可，不要重复描述图片内容。\n"
+                f"生成的文件：\n{paths_str}"
             )
 
-        # 下载并发送
-        sent_paths = await self._download_and_send(event, urls)
+        # 异步模式（默认）：工具快速返回，后台生成+下载+发送，完成后 publish_notice 通知 LLM 接话
+        sid = self._get_sid(event)
+        if sid in self._gen_tasks and not self._gen_tasks[sid].done():
+            return "⏳ 该会话已有图片生成任务在进行，完成后会自动发送，请告知用户稍候，不要重复请求。"
 
-        if not sent_paths:
-            return (
-                "生成失败：API 返回了图片链接，但所有图片下载或发送均失败。"
-                "请检查网络连接是否正常。"
-            )
+        async def _run():
+            try:
+                urls = await self._call_agnes_api(
+                    prompt=full_prompt,
+                    size=size,
+                    n=count,
+                    reference_image_urls=ref_urls if ref_urls else None,
+                )
+                if not urls:
+                    await self._publish_notice(
+                        sid,
+                        "系统通知：图片生成失败（Agnes API 不可用或繁忙，已自动重试3次），"
+                        "请告知用户稍后重试，不要反复立即重试。",
+                    )
+                    return
+                sent = await self._download_and_send(event, urls)
+                if not sent:
+                    await self._publish_notice(
+                        sid,
+                        "系统通知：图片生成成功但下载/发送失败（网络问题），请告知用户。",
+                    )
+                    return
+                send_mode = (
+                    "合并转发"
+                    if (self.send_as_forward and len(sent) > 1)
+                    else "直接发送"
+                )
+                paths_str = "\n".join(f"  - {p}" for p in sent)
+                await self._publish_notice(
+                    sid,
+                    f"系统通知：{mode_str}完成，{len(sent)} 张图片已以「{send_mode}」发送到聊天，"
+                    "请用一两句话告知用户图片已生成，不要重复发送、不要使用 <file> 标签。"
+                    f"生成的文件：\n{paths_str}",
+                )
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("[agnes_image_gen] 后台生成失败")
+                await self._publish_notice(
+                    sid, "系统通知：图片生成失败，请告知用户稍后重试。")
+            finally:
+                self._gen_tasks.pop(sid, None)
 
-        # 构造返回给 LLM 的提示文本
-        send_mode = (
-            "合并转发"
-            if (self.send_as_forward and len(sent_paths) > 1)
-            else "直接发送"
-        )
-
-        paths_str = "\n".join(f"  - {p}" for p in sent_paths)
+        task = asyncio.create_task(_run())
+        self._gen_tasks[sid] = task
         return (
-            f"已成功以「{send_mode}」发送 {len(sent_paths)} 张图片到当前聊天。\n"
-            f"──────────────────────\n"
-            f"模式：{mode_str}  风格：{style_label}  尺寸：{size_label}\n"
-            f"──────────────────────\n"
-            f"这些图片已由工具直接发送完毕，你无需再次发送，也禁止使用 <file> 标签。\n"
-            f"请用中文简短告知用户图片已生成即可，不要重复描述图片内容。\n"
-            f"生成的文件：\n{paths_str}"
+            f"✅ 已开始生成图片（{mode_str}，{style_label}，{size_label}），需要一点时间，"
+            "完成后会自动发送到聊天，请告知用户稍候。"
         )
 
     # ── Prompt 注入 ──────────────────────────────────────────────
