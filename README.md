@@ -1,7 +1,7 @@
 # Agnes AI 图片生成插件
 
 [![KiraAI](https://img.shields.io/badge/KiraAI-插件-blue)](https://github.com/znq19/KiraAI)
-[![版本](https://img.shields.io/badge/version-1.2.0-green)]()
+[![版本](https://img.shields.io/badge/version-1.2.1-green)]()
 [![Python](https://img.shields.io/badge/Python-3.10+-yellow)]()
 
 > 让 KiraAI 的 Bot 能通过 Agnes AI 快速生成高质量（大概是吧）图片，**自动发送到聊天**，全程无需手动操作。
@@ -95,6 +95,11 @@ AGPLv 3.0
 
 <details>
 <summary>📜 更新日志</summary>
+
+### v1.2.1（2026-08-29）
+
+**✨ 新增**
+- 🎨 **插件图标**：新增 512×512 圆角透明底 PNG 图标（热带水果市场少女），manifest 增加 `icon` 字段，WebUI 插件列表显示图标
 
 ### v1.2.0（2026-08-08）
 
